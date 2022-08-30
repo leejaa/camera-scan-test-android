@@ -10,6 +10,8 @@ import android.os.Bundle
 import android.provider.MediaStore
 import android.util.Log
 import android.util.Log.VERBOSE
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -35,16 +37,25 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.net.toFile
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import com.google.firebase.FirebaseApp
+import com.google.firebase.ktx.Firebase
+import com.google.firebase.ktx.initialize
+import com.google.firebase.storage.FirebaseStorage
+import com.google.firebase.storage.ktx.storage
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
@@ -53,6 +64,8 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
 class MainActivity : ComponentActivity() {
+
+    lateinit var storage: FirebaseStorage
 
     private fun getOutputDirectory(): File {
         val mediaDir = externalMediaDirs.firstOrNull()?.let{
@@ -70,7 +83,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        FirebaseApp.initializeApp(this)
+
+        storage = Firebase.storage("gs://image-upload-9e41f.appspot.com")
+
         setContent {
+
+            val viewModel = viewModel<MainViewModel>()
+
             val navController = rememberNavController()
 
             var granted by remember { mutableStateOf(false) }
@@ -95,15 +115,18 @@ class MainActivity : ComponentActivity() {
 
             NavHost(navController = navController, startDestination = "Home") {
                 composable(route = "Home") {
-//                    HomeScreen(
-//                        onClick = {
-//                            launcher.launch(Manifest.permission.CAMERA)
-//                        }
-//                    )
-                    ScanScreen(navController = navController, getOutputDirectory = { getOutputDirectory() }, executor = getExecutor())
+                    HomeScreen(
+                        onClick = {
+                            launcher.launch(Manifest.permission.CAMERA)
+                        }
+                    )
+//                    ScanScreen(navController = navController, getOutputDirectory = { getOutputDirectory() }, executor = getExecutor(), storage)
                 }
                 composable(route = "Scan") {
-                    ScanScreen(navController = navController, getOutputDirectory = { getOutputDirectory() }, executor = getExecutor())
+                    ScanScreen(navController = navController, getOutputDirectory = { getOutputDirectory() }, executor = getExecutor(), storage, viewModel)
+                }
+                composable(route = "Webview") {
+                    WebViewScreen(url = viewModel.url.value.toString())
                 }
             }
         }
@@ -111,10 +134,33 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
+fun rememberWebView(url: String): WebView {
+    Log.d("url", url)
+    val context = LocalContext.current
+    val webView = remember {
+        WebView(context).apply {
+            settings.javaScriptEnabled = true
+            webViewClient = WebViewClient()
+            loadUrl(url)
+        }
+    }
+    return webView
+}
+
+@Composable
+fun WebViewScreen(url: String) {
+    val webview = rememberWebView(url)
+
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { webview },
+    )
+}
+
+@Composable
 fun HomeScreen(
     onClick: () -> Unit
 ) {
-
     Scaffold(
         topBar = {
             TopAppBar(title = { Text(text = "홈화면") })
@@ -134,7 +180,7 @@ fun HomeScreen(
 }
 
 @Composable
-fun ScanScreen(navController: NavController, getOutputDirectory: () -> File, executor: Executor) {
+fun ScanScreen(navController: NavController, getOutputDirectory: () -> File, executor: Executor, storage: FirebaseStorage, viewModel: MainViewModel) {
 
     // 1
     val lensFacing = CameraSelector.LENS_FACING_BACK
@@ -147,6 +193,8 @@ fun ScanScreen(navController: NavController, getOutputDirectory: () -> File, exe
     val cameraSelector = CameraSelector.Builder()
         .requireLensFacing(lensFacing)
         .build()
+
+    val buttonText = if(viewModel.isLoading.value) "이미지를 업로드중입니다..." else "카드스캔"
 
     // 2
     LaunchedEffect(lensFacing) {
@@ -208,12 +256,16 @@ fun ScanScreen(navController: NavController, getOutputDirectory: () -> File, exe
 
             Button(
                 onClick = {
+                    viewModel.isLoading.value = true
+
                     val outputDirectory = getOutputDirectory()
+
+                    val fileName = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
+                        .format(System.currentTimeMillis()) + ".jpg"
 
                     val photoFile = File(
                         outputDirectory,
-                        SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
-                            .format(System.currentTimeMillis()) + ".jpg"
+                        fileName
                     )
 
                     val outputOptions = ImageCapture
@@ -230,15 +282,42 @@ fun ScanScreen(navController: NavController, getOutputDirectory: () -> File, exe
                             }
 
                             override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                                val msg = "Photo capture succeeded: ${outputFileResults.savedUri}"
+                                val msg = "Photo capture succeeded: ${outputFileResults.savedUri.toString()}"
                                 Log.d("success", msg)
+
+                                val storageRef = storage.reference
+
+                                var file = Uri.fromFile(outputFileResults.savedUri?.toFile())
+
+                                val imageRef = storageRef.child("images/${file.lastPathSegment}")
+                                var uploadTask = imageRef.putFile(file)
+
+                                val ref = storageRef.child("images/${fileName}")
+                                uploadTask = ref.putFile(file)
+
+                                val urlTask = uploadTask.continueWithTask { task ->
+                                    if (!task.isSuccessful) {
+                                        task.exception?.let {
+                                            throw it
+                                        }
+                                    }
+                                    ref.downloadUrl
+                                }.addOnCompleteListener { task ->
+                                    if (task.isSuccessful) {
+                                        val downloadUri = task.result
+                                        Log.d("downloadUri", downloadUri.toString())
+                                        viewModel.url.value = "https://brg-test.vercel.app/webview?imageUrl=${downloadUri.toString()}"
+                                        navController.navigate("Webview")
+                                    }
+                                    viewModel.isLoading.value = false
+                                }
                             }
                         }
                     )
                 },
                 modifier = Modifier.align(Alignment.CenterHorizontally)
             ) {
-                Text(text = "카드스캔")
+                Text(text = buttonText)
             }
         }
     }
@@ -260,3 +339,7 @@ private suspend fun Context.getCameraProvider(): ProcessCameraProvider =
         }
     }
 
+class MainViewModel : ViewModel() {
+    val url = mutableStateOf("")
+    val isLoading = mutableStateOf(false)
+}
