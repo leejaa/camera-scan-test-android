@@ -69,15 +69,12 @@ class MainActivity : ComponentActivity() {
 
     private fun getOutputDirectory(): File {
         val mediaDir = externalMediaDirs.firstOrNull()?.let{
-            File(it, resources.getString(R.string.app_name)).apply{mkdirs()}}
+            File(it, resources.getString(R.string.app_name)).apply{mkdirs()}
+        }
         return if(mediaDir != null && mediaDir.exists())
             mediaDir
         else
             filesDir
-    }
-
-    private fun getExecutor(): Executor {
-        return ContextCompat.getMainExecutor(this)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -93,25 +90,12 @@ class MainActivity : ComponentActivity() {
 
             val navController = rememberNavController()
 
-            var granted by remember { mutableStateOf(false) }
-
             val launcher =
                 rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
-                    granted = isGranted
                     if (isGranted) {
                         navController.navigate("Scan")
                     }
                 }
-
-            if (ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.CAMERA,
-                ) == PackageManager.PERMISSION_GRANTED
-            ) {
-                granted = true
-            }
-
-            Log.d("granted", granted.toString())
 
             NavHost(navController = navController, startDestination = "Home") {
                 composable(route = "Home") {
@@ -120,10 +104,9 @@ class MainActivity : ComponentActivity() {
                             launcher.launch(Manifest.permission.CAMERA)
                         }
                     )
-//                    ScanScreen(navController = navController, getOutputDirectory = { getOutputDirectory() }, executor = getExecutor(), storage)
                 }
                 composable(route = "Scan") {
-                    ScanScreen(navController = navController, getOutputDirectory = { getOutputDirectory() }, executor = getExecutor(), storage, viewModel)
+                    ScanScreen(navController = navController, getOutputDirectory = { getOutputDirectory() }, storage, viewModel)
                 }
                 composable(route = "Webview") {
                     WebViewScreen(url = viewModel.url.value.toString())
@@ -135,7 +118,6 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun rememberWebView(url: String): WebView {
-    Log.d("url", url)
     val context = LocalContext.current
     val webView = remember {
         WebView(context).apply {
@@ -180,11 +162,10 @@ fun HomeScreen(
 }
 
 @Composable
-fun ScanScreen(navController: NavController, getOutputDirectory: () -> File, executor: Executor, storage: FirebaseStorage, viewModel: MainViewModel) {
-
-    // 1
+fun ScanScreen(navController: NavController, getOutputDirectory: () -> File, storage: FirebaseStorage, viewModel: MainViewModel) {
     val lensFacing = CameraSelector.LENS_FACING_BACK
     val context = LocalContext.current
+    val executor = ContextCompat.getMainExecutor(context)
     val lifecycleOwner = LocalLifecycleOwner.current
 
     val preview = Preview.Builder().build()
@@ -196,7 +177,6 @@ fun ScanScreen(navController: NavController, getOutputDirectory: () -> File, exe
 
     val buttonText = if(viewModel.isLoading.value) "이미지를 업로드중입니다..." else "카드스캔"
 
-    // 2
     LaunchedEffect(lensFacing) {
         val cameraProvider = context.getCameraProvider()
         cameraProvider.unbindAll()
@@ -260,13 +240,10 @@ fun ScanScreen(navController: NavController, getOutputDirectory: () -> File, exe
 
                     val outputDirectory = getOutputDirectory()
 
-                    val fileName = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
+                    val fileName = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.KOREA)
                         .format(System.currentTimeMillis()) + ".jpg"
 
-                    val photoFile = File(
-                        outputDirectory,
-                        fileName
-                    )
+                    val photoFile = File(outputDirectory, fileName)
 
                     val outputOptions = ImageCapture
                         .OutputFileOptions
@@ -282,20 +259,14 @@ fun ScanScreen(navController: NavController, getOutputDirectory: () -> File, exe
                             }
 
                             override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                                val msg = "Photo capture succeeded: ${outputFileResults.savedUri.toString()}"
-                                Log.d("success", msg)
-
                                 val storageRef = storage.reference
 
                                 var file = Uri.fromFile(outputFileResults.savedUri?.toFile())
 
-                                val imageRef = storageRef.child("images/${file.lastPathSegment}")
-                                var uploadTask = imageRef.putFile(file)
-
                                 val ref = storageRef.child("images/${fileName}")
-                                uploadTask = ref.putFile(file)
+                                var uploadTask = ref.putFile(file)
 
-                                val urlTask = uploadTask.continueWithTask { task ->
+                                uploadTask.continueWithTask { task ->
                                     if (!task.isSuccessful) {
                                         task.exception?.let {
                                             throw it
@@ -305,7 +276,6 @@ fun ScanScreen(navController: NavController, getOutputDirectory: () -> File, exe
                                 }.addOnCompleteListener { task ->
                                     if (task.isSuccessful) {
                                         val downloadUri = task.result
-                                        Log.d("downloadUri", downloadUri.toString())
                                         viewModel.url.value = "https://brg-test.vercel.app/webview?imageUrl=${downloadUri.toString()}"
                                         navController.navigate("Webview")
                                     }
